@@ -31,7 +31,7 @@ bool serial_getc_isavail(void);
 
 static volatile uint32_t systick_ms   = 0;
 static volatile uint32_t freq         = 0; /* 32bit = approx. 4.3G ticks per second. */
-static volatile uint32_t freq_scratch = 0; /* scratch pad. */
+static volatile uint16_t freq_scratch = 0; /* scratch pad. */
 static volatile bool     hold         = false;
 
 static uint32_t mco_val[] = {
@@ -403,7 +403,7 @@ int main(void) {
 
 void tim2_isr(void) {
   if (timer_get_flag(TIM2, TIM_SR_CC1IF)) {
-    freq_scratch += 65536; /* TIM2 is 16-bit and overflows every 65536 events. */
+    freq_scratch++; /* TIM2 is 16-bit and overflows every 65536 events. */
     timer_clear_flag(TIM2, TIM_SR_CC1IF); /* Clear interrupt flag. */
   }
 }
@@ -417,7 +417,10 @@ void sys_tick_handler(void) {
   if (systick_ms % 1000 == 0) {
     /* Scratch pad to finalized result */
     if (!hold) {
-      freq = freq_scratch + timer_get_counter(TIM2);
+      /* freq_scratch is the number of overflows that happened;
+       * each overflow is 65536 edges;
+       * so we must do freq_scratch * 65536, which is the same as freq_scratch << 16 */
+      freq = (freq_scratch << 16) + timer_get_counter(TIM2);
       if (prescaler_current)
         freq *= (1 << prescaler_current);
     }
