@@ -7,7 +7,11 @@
 #include <libopencm3/stm32/timer.h>
 #include <libopencm3/cm3/nvic.h>
 #include <libopencm3/cm3/systick.h>
+#ifdef USBSERIAL
 #include <libopencm3/usb/usbd.h>
+#else
+#include <libopencm3/stm32/usart.h>
+#endif
 
 #include "usbcdc.h"
 
@@ -15,7 +19,13 @@
 
 #define PACKET_SIZE 64
 #define BUFFER_SIZE 256
-#define DISP_DELAY  100
+#define DISP_DELAY  500
+
+size_t serial_write(char *buf, size_t n);
+char serial_getc(void);
+bool serial_getc_isavail(void);
+
+// #define USBSERIAL
 
 /* NOTE: For systems that has SYSCLK != 72MHz, modify mco_val, mco_name and filters_name in addition to clock setup. */
 
@@ -164,7 +174,7 @@ void mco_setup(void) {
   rcc_set_mco(mco_val[mco_current]); /* This merely sets RCC_CFGR. */
 }
 
-void usbcdc_printf(const char *fmt, ...) {
+void serial_printf(const char *fmt, ...) {
   int len;
   uint16_t written = 0;
   va_list args;
@@ -179,19 +189,26 @@ void usbcdc_printf(const char *fmt, ...) {
   );
   while (written < len) {
     if ((len - written) > PACKET_SIZE) {
-      written += usbcdc_write(buffer + written, PACKET_SIZE);
+      written += serial_write(buffer + written, PACKET_SIZE);
     } else {
-      written += usbcdc_write(buffer + written, len - written);
+      written += serial_write(buffer + written, len - written);
     }
   }
 }
 
-void usbcdc_clear_screen(void) {
-  usbcdc_printf("\033c\r");
+#ifdef USBSERIAL
+
+void serial_clear_screen(void) {
+  serial_printf("\033c\r");
 }
+#endif
 
 void poll_command(void) {
-  char cmd = usbcdc_getc();
+  char cmd;
+  if(!serial_getc_isavail())
+    cmd = '\0';
+  else
+    cmd = serial_getc();
 
   switch (cmd) {
     case '\0': {
@@ -261,15 +278,67 @@ void poll_command(void) {
   }
 }
 
+
+void init_led(void)
+{
+  rcc_periph_clock_enable(RCC_GPIOC); /* on-board led */
+  gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO13);
+  gpio_set(GPIOC, GPIO13);
+}
+
+#ifndef USBSERIAL
+void uart_init(void)
+{
+	// Serial comunication = USART1 = A9+A10
+  rcc_periph_clock_enable(RCC_USART1);
+  gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_50_MHZ,
+      GPIO_CNF_OUTPUT_ALTFN_PUSHPULL,
+      GPIO_USART1_TX);
+  usart_set_baudrate(USART1, 115200);
+  usart_set_databits(USART1,8);
+  usart_set_stopbits(USART1,USART_STOPBITS_1);
+  usart_set_mode(USART1,USART_MODE_TX_RX);
+  usart_set_parity(USART1,USART_PARITY_NONE);
+  usart_set_flow_control(USART1,USART_FLOWCONTROL_NONE);
+  usart_enable(USART1);
+}
+bool serial_getc_isavail(void)
+{
+  return !((USART_SR(USART1) & USART_SR_RXNE) == 0);
+}
+char serial_getc(void)
+{
+  return usart_recv_blocking(USART1);
+}
+void serial_clear_screen(void) {
+  serial_write("\033c\r", 3);
+}
+void serial_putc(char c)
+{
+  // blocking!
+  while(!usart_get_flag(USART1, USART_SR_TXE))
+    ;
+  usart_send_blocking(USART1, c);
+}
+size_t serial_write(char *buf, size_t n)
+{
+  // blocking!
+  size_t i=0;
+  for(; *buf != '\0' && n; buf++, n--) {
+    serial_putc(*buf);
+    i++;
+  }
+  return i;
+}
+#endif
+
 int main(void) {
+  init_led();
   rcc_clock_setup_in_hse_8mhz_out_72mhz();
   rcc_periph_clock_enable(RCC_GPIOA); /* For MCO. */
-  rcc_periph_clock_enable(RCC_GPIOB); /* For LED, USB pull-up and TIM2. */
+  rcc_periph_clock_enable(RCC_GPIOB); /* For USB pull-up and TIM2. */
   rcc_periph_clock_enable(RCC_AFIO); /* For MCO. */
-
-  /* Setup PB1 for the LED. */
-  gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO1);
-  gpio_set(GPIOB, GPIO1);
+  rcc_periph_clock_enable(RCC_USB); /* For USB. */
 
   /* Pull PA1 down to GND, which is adjascent to timer imput and can be used as an convenient return path. */
   gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO1);
@@ -279,9 +348,11 @@ int main(void) {
   gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_OPENDRAIN, GPIO9);
   gpio_clear(GPIOB, GPIO9);
 
+#ifdef USBSERIAL
   usbcdc_init();
-
-  gpio_clear(GPIOB, GPIO1);
+#else
+  uart_init();
+#endif
 
   timer_setup();
   systick_ms_setup();
@@ -290,35 +361,36 @@ int main(void) {
   /* Wait 500ms for USB setup to complete before trying to send anything. */
   /* Takes ~ 130ms on my machine */
   // TODO: a better way?
+  gpio_clear(GPIOC, GPIO13);
   while (systick_ms < 500);
+  gpio_set(GPIOC, GPIO13);
 
   /* The loop. */
   uint32_t last_ms = 0;
 
-  while (freq == 0);
+  //while (freq == 0);
 
   /* The loop (for real). */
-  while (true) {
+  while (1) {
+    serial_clear_screen();
     // TODO: whether to support dividers? Any meaningful use?
     poll_command();
 
     // TODO: currently missing 20 ticks out of 36,000,000 ticks (<0.6ppm error).
     //       However, before we use TCXO to supply clock to the MCU, fixing it will not improve precision.
 
-    usbcdc_clear_screen();
-
     /* NOTE: Subtract one extra overflow (65536 ticks) occurred during counter reset. */
     /* TODO: The following line costs approx. 20KB. Find an alternative if necessary. */
-    usbcdc_printf("%4lu.%06lu MHz %c [Hold: %s]\r\n\r\n",
+    serial_printf("%4lu.%06lu MHz %c [Hold: %s]\r\n\r\n",
       (freq - 65536) / 1000000,
       (freq - 65536) % 1000000,
-      gpio_get(GPIOB, GPIO1) ? '.' : ' ',
+      gpio_get(GPIOC, GPIO13) ? '.' : ' ',
       hold ? "ON " : "OFF"
     );
 
-    usbcdc_printf("Clock output: %s\r\n", mco_name[mco_current]);
-    usbcdc_printf("Digital Filter: %s\r\n", filters_name[filter_current]);
-    usbcdc_printf("Pre-scaler: %s\r\n", prescalers_name[prescaler_current]);
+    serial_printf("Clock output: %s\r\n", mco_name[mco_current]);
+    serial_printf("Digital Filter: %s\r\n", filters_name[filter_current]);
+    serial_printf("Pre-scaler: %s\r\n", prescalers_name[prescaler_current]);
 
     while (systick_ms < (last_ms + DISP_DELAY));
     last_ms = systick_ms;
@@ -337,7 +409,10 @@ void tim2_isr(void) {
 }
 
 void sys_tick_handler(void) {
+
   systick_ms ++;
+
+
 
   if (systick_ms % 1000 == 0) {
     /* Scratch pad to finalized result */
@@ -351,6 +426,6 @@ void sys_tick_handler(void) {
     timer_set_counter(TIM2, 1);
     timer_set_counter(TIM2, 0);
     freq_scratch = 0;
-    gpio_toggle(GPIOB, GPIO1);
+    gpio_toggle(GPIOC, GPIO13);
   }
 }
