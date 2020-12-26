@@ -19,13 +19,25 @@
 
 #define PACKET_SIZE 64
 #define BUFFER_SIZE 256
-#define DISP_DELAY  500
 
 size_t serial_write(char *buf, size_t n);
 char serial_getc(void);
 bool serial_getc_isavail(void);
 
-// #define USBSERIAL
+
+void sys_tick_ms_setup(void);
+void init_led(void);
+void mco_setup(void);
+void timer_setup(void);
+void poll_command(void);
+uint32_t tmr23_get(void);
+
+#ifndef USBSERIAL
+void uart_init(void);
+void serial_printf(const char*, ...);
+void serial_clear_screen(void);
+void serial_putc(char);
+#endif
 
 /* NOTE: For systems that has SYSCLK != 72MHz, modify mco_val, mco_name and filters_name in addition to clock setup. */
 
@@ -58,7 +70,7 @@ static char *mco_name[] = {
   //"XT1      ", /* No signal. */
   //"PLL3     ", /* No signal. */
 };
-static int mco_current = 0; /* Default to off. */
+static unsigned int mco_current = 2; /* Default to off. */
 
 static enum tim_ic_filter filters_val[] = {
   TIM_IC_OFF,
@@ -108,7 +120,7 @@ static char *filters_name[] = {
   "375.00 kHz",
   "281.25 kHz",
 };
-static int filter_current = 0; /* Default to no filter. */
+static unsigned int filter_current = 0; /* Default to no filter. */
 
 static enum tim_ic_psc prescalers_val[] = {
   TIM_IC_PSC_OFF,
@@ -124,7 +136,7 @@ static char *prescalers_name[] = {
   "  4",
   "  8",
 };
-static int prescaler_current = 0; /* Default to no prescaler. */
+static unsigned int prescaler_current = 0; /* Default to no prescaler. */
 
 static char buffer[BUFFER_SIZE];
 
@@ -418,7 +430,7 @@ int main(void) {
     serial_printf("Pre-scaler: %s\r\n", prescalers_name[prescaler_current]);
     serial_printf("Refresh every: %ds\r\n", refresh_seconds);
 
-    while (systick_ms < (last_ms + DISP_DELAY));
+    while (systick_ms < last_ms + 1) ;
     last_ms = systick_ms;
   }
 
