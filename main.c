@@ -31,8 +31,10 @@ bool serial_getc_isavail(void);
 
 static volatile uint32_t systick_ms   = 0;
 static volatile uint32_t freq         = 0; /* 32bit = approx. 4.3G ticks per second. */
-static volatile uint16_t freq_scratch = 0; /* scratch pad. */
 static volatile bool     hold         = false;
+// increasing refresh_seconds make measurements more precise. of course the interface is less responsive
+// TODO: show both "instant" measure and average over last N seconds automatically
+uint8_t refresh_seconds = 1;
 
 static uint32_t mco_val[] = {
   RCC_CFGR_MCO_NOCLK,
@@ -126,10 +128,11 @@ static int prescaler_current = 0; /* Default to no prescaler. */
 
 static char buffer[BUFFER_SIZE];
 
-void systick_ms_setup(void) {
-  /* 72MHz clock, interrupt for every 72,000 CLKs (1ms). */
-  systick_set_clocksource(STK_CSR_CLKSOURCE_AHB);
-  systick_set_reload(72000 - 1);
+void sys_tick_ms_setup(void) {
+  // use the 9MHz source (72MHz / 8)
+  systick_set_clocksource(STK_CSR_CLKSOURCE_AHB_DIV8);
+  // and count to 9e6 -1
+  systick_set_reload(9000000 - 1);
   systick_interrupt_enable();
   systick_counter_enable();
 }
@@ -139,6 +142,8 @@ void timer_setup(void) {
 
   rcc_periph_clock_enable(RCC_TIM2);
   rcc_periph_reset_pulse(RST_TIM2);
+  rcc_periph_clock_enable(RCC_TIM3);
+  rcc_periph_reset_pulse(RST_TIM3);
 
   /* Disable inputs. */
   timer_ic_disable(TIM2, TIM_IC1);
@@ -148,7 +153,7 @@ void timer_setup(void) {
 
   /* Disable outputs. */
   timer_disable_oc_output(TIM2, TIM_OC1);
-  timer_disable_oc_output(TIM2, TIM_OC2);
+  timer_enable_oc_output(TIM2, TIM_OC2);
   timer_disable_oc_output(TIM2, TIM_OC3);
   timer_disable_oc_output(TIM2, TIM_OC4);
 
@@ -156,16 +161,35 @@ void timer_setup(void) {
   timer_disable_preload(TIM2);
   timer_continuous_mode(TIM2);
   timer_set_period(TIM2, 65535);
+  timer_set_master_mode(TIM2, TIM_CR2_MMS_UPDATE);
   timer_slave_set_mode(TIM2, TIM_SMCR_SMS_ECM1);
   timer_slave_set_filter(TIM2, filters_val[filter_current]);
   timer_slave_set_polarity(TIM2, TIM_ET_RISING);
   timer_slave_set_prescaler(TIM2, prescalers_val[prescaler_current]);
   timer_slave_set_trigger(TIM2, TIM_SMCR_TS_ETRF);
-  timer_update_on_overflow(TIM2);
 
-  nvic_enable_irq(NVIC_TIM2_IRQ);
   timer_enable_counter(TIM2);
-  timer_enable_irq(TIM2, TIM_DIER_CC1IE);
+
+  /* Disable inputs. */
+  timer_ic_disable(TIM3, TIM_IC1);
+  timer_ic_enable(TIM3, TIM_IC2);
+  timer_ic_disable(TIM3, TIM_IC3);
+  timer_ic_disable(TIM3, TIM_IC4);
+
+  timer_disable_preload(TIM3);
+  timer_continuous_mode(TIM3);
+  timer_set_period(TIM3, 65535);
+  timer_slave_set_mode(TIM3, TIM_SMCR_SMS_ECM1);
+  timer_slave_set_filter(TIM3, TIM_IC_OFF);
+  timer_slave_set_polarity(TIM3, TIM_ET_RISING);
+  timer_slave_set_prescaler(TIM3, TIM_IC_PSC_OFF);
+  // TMR2 -> ITR1, as explained at p. 359 of the reference manual
+  timer_slave_set_trigger(TIM3, TIM_SMCR_TS_ITR1);
+
+  nvic_disable_irq(NVIC_TIM2_IRQ);
+  nvic_disable_irq(NVIC_TIM3_IRQ);
+  timer_enable_counter(TIM3);
+  // timer_enable_irq(TIM2, TIM_DIER_CC1IE);
 }
 
 void mco_setup(void) {
@@ -355,15 +379,8 @@ int main(void) {
 #endif
 
   timer_setup();
-  systick_ms_setup();
+  sys_tick_ms_setup();
   mco_setup();
-
-  /* Wait 500ms for USB setup to complete before trying to send anything. */
-  /* Takes ~ 130ms on my machine */
-  // TODO: a better way?
-  gpio_clear(GPIOC, GPIO13);
-  while (systick_ms < 500);
-  gpio_set(GPIOC, GPIO13);
 
   /* The loop. */
   uint32_t last_ms = 0;
@@ -382,8 +399,8 @@ int main(void) {
     /* NOTE: Subtract one extra overflow (65536 ticks) occurred during counter reset. */
     /* TODO: The following line costs approx. 20KB. Find an alternative if necessary. */
     serial_printf("%4lu.%06lu MHz %c [Hold: %s]\r\n\r\n",
-      (freq - 65536) / 1000000,
-      (freq - 65536) % 1000000,
+      (freq) / 1000000,
+      (freq) % 1000000,
       gpio_get(GPIOC, GPIO13) ? '.' : ' ',
       hold ? "ON " : "OFF"
     );
@@ -399,36 +416,36 @@ int main(void) {
   return 0;
 }
 
-/* Interrupts */
 
-void tim2_isr(void) {
-  if (timer_get_flag(TIM2, TIM_SR_CC1IF)) {
-    freq_scratch++; /* TIM2 is 16-bit and overflows every 65536 events. */
-    timer_clear_flag(TIM2, TIM_SR_CC1IF); /* Clear interrupt flag. */
-  }
+uint32_t tmr23_get(void) {
+  uint16_t msw, lsw;					//timer's high/low words
+
+  //double read to maintain atomicity
+  do {
+    msw = timer_get_counter(TIM3);				//read the msw
+    lsw = timer_get_counter(TIM2);				//read the msw
+  } while (msw != timer_get_counter(TIM3));			//see if overflow has taken place
+  return (msw << 16) | lsw;			//return 32-bit time
 }
 
+/* Interrupts */
+
 void sys_tick_handler(void) {
-
-  systick_ms ++;
-
-
-
-  if (systick_ms % 1000 == 0) {
-    /* Scratch pad to finalized result */
+  // this is called once per second
+  uint32_t raw_frequency = tmr23_get();
+  systick_ms += 1000;
+  if (systick_ms % (1000*refresh_seconds) == 0) {
+    // get raw values from counters as soon as possible, to have better precision
     if (!hold) {
-      /* freq_scratch is the number of overflows that happened;
-       * each overflow is 65536 edges;
-       * so we must do freq_scratch * 65536, which is the same as freq_scratch << 16 */
-      freq = (freq_scratch << 16) + timer_get_counter(TIM2);
+      freq = raw_frequency;
       if (prescaler_current)
-        freq *= (1 << prescaler_current);
+        freq <<= prescaler_current;
+      freq /= refresh_seconds;
     }
     /* Reset the counter. This will generate one extra overflow for next measurement. */
     /* In case of nothing got counted, manually generate a reset to keep consistency. */
-    timer_set_counter(TIM2, 1);
     timer_set_counter(TIM2, 0);
-    freq_scratch = 0;
+    timer_set_counter(TIM3, 0);
     gpio_toggle(GPIOC, GPIO13);
   }
 }
