@@ -286,6 +286,14 @@ void poll_command(void) {
 
       return;
     }
+    case 'r':
+    case 'R': {
+      refresh_seconds <<= 1;
+      if(refresh_seconds > 64) {
+        refresh_seconds = 1;
+      }
+      return;
+    }
 
     case '\n':
     case '\r': {
@@ -408,6 +416,7 @@ int main(void) {
     serial_printf("Clock output: %s\r\n", mco_name[mco_current]);
     serial_printf("Digital Filter: %s\r\n", filters_name[filter_current]);
     serial_printf("Pre-scaler: %s\r\n", prescalers_name[prescaler_current]);
+    serial_printf("Refresh every: %ds\r\n", refresh_seconds);
 
     while (systick_ms < (last_ms + DISP_DELAY));
     last_ms = systick_ms;
