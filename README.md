@@ -16,6 +16,7 @@ Features
 * Configurable clock generator for diagnosis (output on **MCO** pin, aka. **PA8**).
 * Configurable digital filter.
 * Holding support.
+* Supports PCD8544 screen
 
 Build and Flash
 ---------------
@@ -45,6 +46,8 @@ Then, type `screen /dev/ttyACM0` or `minicom -D /dev/ttyACM0` or `picocom /dev/t
 
 Output and Usage
 ----------------
+
+### Serial usage
 
 Typical terminal output will look like the following after being powered up:
 
@@ -148,12 +151,17 @@ The following prescaler configurations are available:
 * 4
 * 8
 
+### Usage via screen
+
+usage with screen is less mature than serial. ATM it works, but there are no buttons. To change any option you
+still have to use serial which is definitely uncomfortable.
+
 Add-ons
 -------
 
 Please see the "addons" folder for details.
 
-Known Issues
+Accuracy
 ------------
 
 * Currently the code drops 20 ticks out of 36,000,000 ticks (<0.6ppm error).
