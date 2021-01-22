@@ -1,6 +1,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/gpio.h>
@@ -13,7 +14,7 @@
 #include <libopencm3/stm32/usart.h>
 #endif
 
-#include "usbcdc.h"
+#include "lib/pcd8544/pcd8544.h"
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
@@ -147,6 +148,48 @@ void sys_tick_ms_setup(void) {
   systick_set_reload(9000000 - 1);
   systick_interrupt_enable();
   systick_counter_enable();
+}
+
+static void pcd8544_setup(void) {
+  rcc_periph_clock_enable(RCC_SPI2);
+  /* Configure GPIOs: SS=PCD8544_SPI_SS, SCK=PCD8544_SPI_SCK, MISO=UNUSED and MOSI=PCD8544_SPI_MOSI */
+  gpio_set_mode(PCD8544_SPI_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL,
+                PCD8544_SPI_MOSI | PCD8544_SPI_SCK | PCD8544_SPI_SS);
+  /* Reset SPI, SPI_CR1 register cleared, SPI is disabled */
+  spi_reset(PCD8544_SPI);
+  /* Set up SPI in Master mode with:
+   * Clock baud rate: 1/64 of peripheral clock frequency
+   * Clock: CPOL CPHA (0:0)
+   * Data frame format: 8-bit
+   * Frame format: MSB First
+   */
+  spi_init_master(PCD8544_SPI, SPI_CR1_BAUDRATE_FPCLK_DIV_128, SPI_CR1_CPOL_CLK_TO_0_WHEN_IDLE,
+                  SPI_CR1_CPHA_CLK_TRANSITION_1, SPI_CR1_DFF_8BIT, SPI_CR1_MSBFIRST);
+
+  /*
+   * Set NSS management to software.
+   *
+   * Note:
+   * Setting nss high is very important, even if we are controlling the GPIO
+   * ourselves this bit needs to be at least set to 1, otherwise the spi
+   * peripheral will not send any data out.
+   */
+  spi_enable_software_slave_management(PCD8544_SPI);
+  spi_set_nss_high(PCD8544_SPI);
+
+  /* Enable SPI1 periph. */
+  spi_enable(PCD8544_SPI);
+
+  /* Configure GPIOs: DC, SCE, RST */
+  gpio_set_mode(PCD8544_RST_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL,
+                PCD8544_RST);
+  gpio_set_mode(PCD8544_DC_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL,
+                PCD8544_DC);
+  gpio_set_mode(PCD8544_SCE_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL,
+                PCD8544_SCE);
+
+  gpio_set(PCD8544_RST_PORT, PCD8544_RST);
+  gpio_set(PCD8544_SCE_PORT, PCD8544_SCE);
 }
 
 void timer_setup(void) {
@@ -310,7 +353,9 @@ void poll_command(void) {
     case '\n':
     case '\r': {
       /* Remote echo for newline -- for convenient data recording. */
+#ifdef USBSERIAL
       usbcdc_write("\r\n", 1); /* This works since buffer is not modified. */
+#endif
 
       return;
     }
@@ -401,37 +446,82 @@ int main(void) {
   timer_setup();
   sys_tick_ms_setup();
   mco_setup();
+  pcd8544_setup();
+  pcd8544_init();
 
   /* The loop. */
   uint32_t last_ms = 0;
 
+  unsigned screen_refresh = 0;
   //while (freq == 0);
+  char screen_buffer[55];
 
   /* The loop (for real). */
   while (1) {
-    serial_clear_screen();
-    // TODO: whether to support dividers? Any meaningful use?
-    poll_command();
+      serial_clear_screen();
+      // TODO: whether to support dividers? Any meaningful use?
+      poll_command();
 
-    // TODO: currently missing 20 ticks out of 36,000,000 ticks (<0.6ppm error).
-    //       However, before we use TCXO to supply clock to the MCU, fixing it will not improve precision.
+      if(screen_refresh++ >= 10) {
+          screen_refresh=0;
+          pcd8544_init();
+      }
 
-    /* NOTE: Subtract one extra overflow (65536 ticks) occurred during counter reset. */
-    /* TODO: The following line costs approx. 20KB. Find an alternative if necessary. */
-    serial_printf("%4lu.%06lu MHz %c [Hold: %s]\r\n\r\n",
-      (freq) / 1000000,
-      (freq) % 1000000,
-      gpio_get(GPIOC, GPIO13) ? '.' : ' ',
-      hold ? "ON " : "OFF"
-    );
+      pcd8544_clearDisplay();
 
-    serial_printf("Clock output: %s\r\n", mco_name[mco_current]);
-    serial_printf("Digital Filter: %s\r\n", filters_name[filter_current]);
-    serial_printf("Pre-scaler: %s\r\n", prescalers_name[prescaler_current]);
-    serial_printf("Refresh every: %ds\r\n", refresh_seconds);
 
-    while (systick_ms < last_ms + 1) ;
-    last_ms = systick_ms;
+      uint16_t mega = (freq) / 1000000;
+      uint32_t hertz = (freq) % 1000000;
+      if(mega) {
+      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer), "%4uM",
+              mega);
+      pcd8544_drawText(0, 0, BLACK, screen_buffer);
+      }
+      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer), "%06luHz %s",
+              hertz,
+              gpio_get(GPIOC, GPIO13) ? "." : ""
+              );
+      pcd8544_drawText(24, 0, BLACK, screen_buffer);
+      if (hold) {
+          pcd8544_drawText(LCDWIDTH-8, 0, BLACK, "H");
+      }
+
+      // TODO: currently missing 20 ticks out of 36,000,000 ticks (<0.6ppm error).
+      //       However, before we use TCXO to supply clock to the MCU, fixing it will not improve precision.
+
+      /* NOTE: Subtract one extra overflow (65536 ticks) occurred during counter reset. */
+      /* TODO: The following line costs approx. 20KB. Find an alternative if necessary. */
+      serial_printf("%4lu.%06luMHz %c [Hold: %s]\r\n\r\n",
+              mega, hertz,
+              gpio_get(GPIOC, GPIO13) ? '.' : ' ',
+              hold ? "ON " : "OFF"
+              );
+
+      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer),
+              "Output: %s\r\n", mco_name[mco_current]);
+      pcd8544_drawText(0, 10, BLACK, screen_buffer);
+      serial_write(screen_buffer, strlen(screen_buffer));
+
+      // serial_printf("Clock output: %s\r\n", mco_name[mco_current]);
+      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer),
+              "Filter: %s\r\n", filters_name[filter_current]);
+      pcd8544_drawText(0, 19, BLACK, screen_buffer);
+      serial_write(screen_buffer, strlen(screen_buffer));
+
+      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer),
+              "Pre-scaler: %s\r\n", prescalers_name[prescaler_current]);
+      pcd8544_drawText(0, 28, BLACK, screen_buffer);
+      serial_write(screen_buffer, strlen(screen_buffer));
+
+      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer),
+              "Refresh every: %ds\r\n", refresh_seconds);
+      pcd8544_drawText(0, 37, BLACK, screen_buffer);
+      serial_write(screen_buffer, strlen(screen_buffer));
+
+      pcd8544_display();
+
+      while (systick_ms < last_ms + 1) ;
+      last_ms = systick_ms;
   }
 
   return 0;
