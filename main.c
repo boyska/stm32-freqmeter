@@ -14,6 +14,7 @@
 #include <libopencm3/stm32/usart.h>
 #endif
 
+#include "lib/printf/printf.h"
 #include "lib/pcd8544/pcd8544.h"
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
@@ -471,13 +472,15 @@ int main(void) {
 
 
       uint16_t mega = (freq) / 1000000;
-      uint32_t hertz = (freq) % 1000000;
+      uint16_t kilo = (freq / 1000) % 1000;
+      uint16_t hertz = (freq) % 1000;
       if(mega) {
       snprintf(screen_buffer, ARRAY_SIZE(screen_buffer), "%4uM",
               mega);
       pcd8544_drawText(0, 0, BLACK, screen_buffer);
       }
-      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer), "%06luHz %s",
+      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer), "%03u%03uHz %s",
+              kilo,
               hertz,
               gpio_get(GPIOC, GPIO13) ? "." : ""
               );
@@ -491,8 +494,8 @@ int main(void) {
 
       /* NOTE: Subtract one extra overflow (65536 ticks) occurred during counter reset. */
       /* TODO: The following line costs approx. 20KB. Find an alternative if necessary. */
-      serial_printf("%4lu.%06luMHz %c [Hold: %s]\r\n\r\n",
-              mega, hertz,
+      serial_printf("%4u.%03u%03uMHz %c [Hold: %s]\r\n\r\n",
+              mega, kilo, hertz,
               gpio_get(GPIOC, GPIO13) ? '.' : ' ',
               hold ? "ON " : "OFF"
               );
