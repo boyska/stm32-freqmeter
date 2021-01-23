@@ -15,6 +15,7 @@
 #endif
 
 #include "lib/printf/printf.h"
+#include "lib/ugui/ugui.h"
 #include "lib/pcd8544/pcd8544.h"
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
@@ -49,6 +50,7 @@ static volatile bool     hold         = false;
 // increasing refresh_seconds make measurements more precise. of course the interface is less responsive
 // TODO: show both "instant" measure and average over last N seconds automatically
 uint8_t refresh_seconds = 1;
+UG_GUI gui;
 
 static uint32_t mco_val[] = {
   RCC_CFGR_MCO_NOCLK,
@@ -64,9 +66,9 @@ static uint32_t mco_val[] = {
 static char *mco_name[] = {
   "      OFF",
   //"72 MHz   ", /* Will not be able to output. */
-  " 8 MHz RC",
-  " 8 MHz   ",
-  "36 MHz   ",
+  "8 MHz RC",
+  "8 MHz   ",
+  "36 MHz",
   //"PLL2     ", /* No signal. */
   //"PLL3 DIV2", /* No signal. */
   //"XT1      ", /* No signal. */
@@ -99,14 +101,14 @@ static enum tim_ic_filter filters_val[] = {
   TIM_IC_DTF_DIV_32_N_8,
 };
 static char *filters_name[] = {
-  "       OFF",
+  "  OFF",
 
-  "36.000 MHz",
-  "18.000 MHz",
-  " 9.000 MHz",
+  "36  MHz",
+  "18  MHz",
+  " 9  MHz",
 
-  " 6.000 MHz",
-  " 4.500 MHz",
+  " 6  MHz",
+  "4.5 MHz",
 
   " 3.000 MHz",
   " 2.250 MHz",
@@ -134,9 +136,9 @@ static enum tim_ic_psc prescalers_val[] = {
 static char *prescalers_name[] = {
   "OFF",
 
-  "  2",
-  "  4",
-  "  8",
+  " 2",
+  " 4",
+  " 8",
 };
 static unsigned int prescaler_current = 0; /* Default to no prescaler. */
 
@@ -150,6 +152,8 @@ void sys_tick_ms_setup(void) {
   systick_interrupt_enable();
   systick_counter_enable();
 }
+
+/* display {{{ */
 
 static void pcd8544_setup(void) {
   rcc_periph_clock_enable(RCC_SPI2);
@@ -192,6 +196,17 @@ static void pcd8544_setup(void) {
   gpio_set(PCD8544_RST_PORT, PCD8544_RST);
   gpio_set(PCD8544_SCE_PORT, PCD8544_SCE);
 }
+
+static void
+local_draw_point(UG_S16 x,UG_S16 y,UG_COLOR c) {
+    uint16_t color = 1;
+    if(c != C_BLACK)
+        color = 0;
+    pcd8544_drawPixel(x, y, color);
+}
+
+
+/* end display }}} */
 
 void timer_setup(void) {
   /* NOTE: Digital input pins have Schmitt filter. */
@@ -449,13 +464,14 @@ int main(void) {
   mco_setup();
   pcd8544_setup();
   pcd8544_init();
+  UG_Init(&gui, local_draw_point, 128, 64);
 
   /* The loop. */
   uint32_t last_ms = 0;
 
   unsigned screen_refresh = 0;
   //while (freq == 0);
-  char screen_buffer[55];
+  char screen_buffer[LCDWIDTH];
 
   /* The loop (for real). */
   while (1) {
@@ -470,24 +486,32 @@ int main(void) {
 
       pcd8544_clearDisplay();
 
+      UG_FontSelect(&FONT_6X10);
+      UG_SetBackcolor(C_WHITE);
+      UG_SetForecolor(C_BLACK);
+      UG_FillScreen(C_WHITE);
+
 
       uint16_t mega = (freq) / 1000000;
       uint16_t kilo = (freq / 1000) % 1000;
       uint16_t hertz = (freq) % 1000;
       if(mega) {
-      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer), "%4uM",
+      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer), "%2u",
               mega);
-      pcd8544_drawText(0, 0, BLACK, screen_buffer);
+      UG_PutString(0, 0,  screen_buffer);
       }
-      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer), "%03u%03uHz %s",
-              kilo,
+      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer), "%03u", kilo);
+      UG_PutString(16, 0,  screen_buffer);
+      snprintf(screen_buffer, ARRAY_SIZE(screen_buffer), "%03uHz %s",
               hertz,
               gpio_get(GPIOC, GPIO13) ? "." : ""
               );
-      pcd8544_drawText(24, 0, BLACK, screen_buffer);
+      UG_PutString(39, 0,  screen_buffer);
       if (hold) {
-          pcd8544_drawText(LCDWIDTH-8, 0, BLACK, "H");
+          UG_PutString(LCDWIDTH-6, 0,  "H");
       }
+
+      UG_FontSelect(&FONT_5X8);
 
       // TODO: currently missing 20 ticks out of 36,000,000 ticks (<0.6ppm error).
       //       However, before we use TCXO to supply clock to the MCU, fixing it will not improve precision.
@@ -501,25 +525,32 @@ int main(void) {
               );
 
       snprintf(screen_buffer, ARRAY_SIZE(screen_buffer),
-              "Output: %s\r\n", mco_name[mco_current]);
-      pcd8544_drawText(0, 10, BLACK, screen_buffer);
+              "Out: %s", mco_name[mco_current]);
+      UG_PutString(0, 10,  screen_buffer);
       serial_write(screen_buffer, strlen(screen_buffer));
+      serial_write("\r\n", 2);
 
-      // serial_printf("Clock output: %s\r\n", mco_name[mco_current]);
+      // serial_printf("Clock output: %s", mco_name[mco_current]);
       snprintf(screen_buffer, ARRAY_SIZE(screen_buffer),
-              "Filter: %s\r\n", filters_name[filter_current]);
-      pcd8544_drawText(0, 19, BLACK, screen_buffer);
+              "F%s:%s",
+              filter_current ? "" : "ilter",
+              filters_name[filter_current]);
+      UG_PutString(0, 19,  screen_buffer);
       serial_write(screen_buffer, strlen(screen_buffer));
+      serial_write("\r\n", 2);
 
       snprintf(screen_buffer, ARRAY_SIZE(screen_buffer),
-              "Pre-scaler: %s\r\n", prescalers_name[prescaler_current]);
-      pcd8544_drawText(0, 28, BLACK, screen_buffer);
+              "Prescaler: %s",
+              prescalers_name[prescaler_current]);
+      UG_PutString(0, 28,  screen_buffer);
       serial_write(screen_buffer, strlen(screen_buffer));
+      serial_write("\r\n", 2);
 
       snprintf(screen_buffer, ARRAY_SIZE(screen_buffer),
-              "Refresh every: %ds\r\n", refresh_seconds);
-      pcd8544_drawText(0, 37, BLACK, screen_buffer);
+              "Refresh: %ds", refresh_seconds);
+      UG_PutString(0, 37,  screen_buffer);
       serial_write(screen_buffer, strlen(screen_buffer));
+      serial_write("\r\n", 2);
 
       pcd8544_display();
 
