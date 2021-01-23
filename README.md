@@ -164,6 +164,5 @@ Please see the "addons" folder for details.
 Accuracy
 ------------
 
-* Currently the code drops 20 ticks out of 36,000,000 ticks (<0.6ppm error).
-  However, before we use TCXO to supply clock to the MCU, fixing it (by multiplying 1.00000056)
-  will not improve precision notably.
+To achieve maximum accuracy, increase the "refresh every" parameter. This can lead to an error of just 1tick
+every 36MHz! (0.027ppm, measured with Refresh=64s)
